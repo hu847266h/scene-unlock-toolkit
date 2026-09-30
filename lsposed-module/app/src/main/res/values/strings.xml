@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Scene 会员解锁</string>
+    <string name="module_desc">Scene工具箱(com.omarea.vtools) 专业版解锁 · libxposed API 101 · 仅本地激活判定，不伪造服务端凭证</string>
+
+    <!-- LSPosed 推荐应用（作用域） -->
+    <string-array name="xposed_scope">
+        <item>com.omarea.vtools</item>
+    </string-array>
+</resources>

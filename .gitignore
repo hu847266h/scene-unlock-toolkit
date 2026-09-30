@@ -1,0 +1,20 @@
+# build artifacts
+lsposed-module/app/build/
+lsposed-module/build/
+lsposed-module/.gradle/
+lsposed-module/local.properties
+*.iml
+.idea/
+
+# secrets & local configs
+*.local.json
+*.deploy.json
+.env
+.dev.vars
+*-cookies.json
+credentials.json
+secrets.json
+
+# debug dumps (device-specific, too large / proprietary)
+dbg/
+*.dmp
