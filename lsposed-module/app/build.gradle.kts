@@ -10,8 +10,8 @@ android {
         applicationId = "com.hu.sceneunlock"
         minSdk = 26
         targetSdk = 34
-        versionCode = 103
-        versionName = "1.4-alpha10"
+        versionCode = 104
+        versionName = "1.5-popup-fix"
     }
 
     buildTypes {

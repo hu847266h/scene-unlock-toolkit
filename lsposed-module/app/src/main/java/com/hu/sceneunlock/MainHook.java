@@ -116,7 +116,189 @@ public class MainHook implements IXposedHookLoadPackage {
                 3, new DiagHook("REQ"));
         tryAnyHookByName(cl, new String[][]{{"a.s10", "j"}, {"a.zz", "j"}},
                 1, new DiagHook("ENC"));
+        // ---- 服务器侧重验弹窗抑制（Alpha10 引入的自动 license 云验证）----
+        // p50.a 是 /release-exchange 响应分发器：服务器拒绝（兑换码绑定其他设备等）
+        // 时弹"盗版"类对话框。跳过拒绝分支 + 吞异常（防 "Unknown error" toast）。
+        tryHookServerDispatch(cl);
+        // 兜底：按文案过滤 license 失败类 toast/对话框（覆盖 a3.a/hb/u1 等所有路径）
+        tryHookPopupFilter(cl);
         XposedBridge.log(TAG + ": hooks " + INSTALLED.size() + " (+" + (INSTALLED.size() - before) + ")");
+    }
+
+    // ------------------------------------------------------------------
+    // 服务器响应弹窗抑制。Scene 的发卡服务器（/release-activate2、/release-exchange）
+    // 会在设备与激活码绑定不符时返回失败，App 据此弹出盗版提示并中断流程；
+    // 这条链路不经过 daemon 裁决漏斗，需在响应分发处单独处理。
+    // 真实兑换成功路径（exchanged/activated）原样放行，不影响正常购买流程。
+    // ------------------------------------------------------------------
+    private static final String EXCHANGE_RESP = "com.omarea.model.ExchangeResponse";
+    private static volatile Method sGetExchanged, sGetActivated, sGetFound, sGetNumber, sGetUsed;
+
+    private static void tryHookServerDispatch(ClassLoader cl) {
+        // 多候选：Alpha10 为 a.p50，后续版本类名可能漂移
+        String[][] candidates = {{"a.p50", "a"}};
+        for (String[] c : candidates) {
+            try {
+                Class<?> dispatch = XposedHelpers.findClass(c[0], cl);
+                Class<?> respClz = XposedHelpers.findClass(EXCHANGE_RESP, cl);
+                Class<?> f70 = XposedHelpers.findClass("a.f70", cl);
+                for (Method m : dispatch.getDeclaredMethods()) {
+                    Class<?>[] ps = m.getParameterTypes();
+                    if (!"a".equals(m.getName()) || ps.length != 4
+                            || !ps[0].getName().equals(c[0])
+                            || ps[1] != f70 || ps[2] != String.class || ps[3] != respClz) {
+                        continue;
+                    }
+                    XposedBridge.hookMethod(m, new XC_MethodHook() {
+                        @Override
+                        protected void beforeHookedMethod(MethodHookParam param) {
+                            Object resp = param.args.length > 3 ? param.args[3] : null;
+                            if (serverRejected(resp)) {
+                                // 服务器拒绝（码未绑定此设备/次数耗尽/未找到）：
+                                // 跳过原方法 → 不弹盗版对话框，流程继续走本地裁决
+                                param.setResult(null);
+                                XposedBridge.log(TAG + ": server-rejected exchange response suppressed");
+                            }
+                        }
+
+                        @Override
+                        protected void afterHookedMethod(MethodHookParam param) {
+                            if (param.hasThrowable()) {
+                                // 吞掉异常 → 调用方的 catch("Unknown error: ") 不再触发
+                                XposedBridge.log(TAG + ": exchange dispatch exception swallowed: "
+                                        + param.getThrowable());
+                                param.setThrowable(null);
+                            }
+                        }
+                    });
+                    INSTALLED.put(c[0] + ".a/4", Boolean.TRUE);
+                    XposedBridge.log(TAG + ": hooked " + c[0] + ".a/4 (exchange dispatch)");
+                    return;
+                }
+                XposedBridge.log(TAG + ": hook " + c[0] + ".a/4 NOT FOUND");
+            } catch (Throwable t) {
+                XposedBridge.log(TAG + ": hook " + c[0] + ".a/4 FAILED: " + t);
+            }
+        }
+    }
+
+    /** 判断兑换响应是否为"服务器拒绝"（模块用户无需关注这些失败弹窗） */
+    private static boolean serverRejected(Object resp) {
+        if (resp == null) {
+            return true;
+        }
+        try {
+            if (sGetExchanged == null) {
+                synchronized (MainHook.class) {
+                    if (sGetExchanged == null) {
+                        Class<?> c = resp.getClass();
+                        sGetExchanged = c.getMethod("getExchanged");
+                        sGetActivated = c.getMethod("getActivated");
+                        sGetFound = c.getMethod("getFound");
+                        sGetNumber = c.getMethod("getNumber");
+                        sGetUsed = c.getMethod("getUsed");
+                    }
+                }
+            }
+            boolean exchanged = (Boolean) sGetExchanged.invoke(resp);
+            boolean activated = (Boolean) sGetActivated.invoke(resp);
+            if (exchanged || activated) {
+                return false; // 真实兑换/绑定成功路径，放行原逻辑
+            }
+            boolean found = (Boolean) sGetFound.invoke(resp);
+            if (!found) {
+                return true; // 服务器未找到记录 / 设备不符 → 盗版提示来源
+            }
+            int number = (Integer) sGetNumber.invoke(resp);
+            int used = (Integer) sGetUsed.invoke(resp);
+            return number <= used; // 次数耗尽 → 抑制；有效未用 → 放行确认对话框
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": serverRejected reflective fail: " + t);
+            return false; // 判定失败时放行，不误伤
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 弹窗文案过滤兜底层。所有 license 失败类 toast/对话框都经过 js1 的
+    // UI 辅助方法；按中英文案精确特征拦截，其余弹窗不受影响。
+    // ------------------------------------------------------------------
+    private static final String[] POPUP_BLOCKLIST = {
+            // 盗版/设备绑定类
+            "Unknown error", "奇怪的错误",
+            "兑换失败", "兑换次数耗尽", "兑换码使用次数已用完", "Run out of exchanges",
+            "你可能输入了无效的兑换码", "invalid exchange code",
+            "但激活设备时出现错误", "an error occurred when activating the device",
+            // 激活失败类
+            "激活失败", "Unable to activate", "Activation failed",
+            "激活信息无效", "启动失败", "Startup failed",
+            // 过期/试用类
+            "试用时间已结束", "trial period has ended",
+            "授权已于", "License expired in", "激活已失效", "License Expired",
+            "可用积分为0", "available credits for this account is 0",
+            "请重新购买", "re-purchase",
+            // 同步/网络失败类
+            "同步超时", "Synchronize timeout",
+            "同步激活状态失败", "Failed to synchronize the activation state",
+            "请检查网络是否顺畅，以及Scene是否更新到最近版本",
+            "Please check whether the network is available",
+    };
+
+    private static boolean popupBlocked(CharSequence text) {
+        if (text == null) {
+            return false;
+        }
+        String s = text.toString();
+        for (String marker : POPUP_BLOCKLIST) {
+            if (s.contains(marker)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void tryHookPopupFilter(ClassLoader cl) {
+        try {
+            Class<?> js1 = XposedHelpers.findClass("a.js1", cl);
+            Class<?> f70 = XposedHelpers.findClass("a.f70", cl);
+            int hits = 0;
+            for (Method m : js1.getDeclaredMethods()) {
+                Class<?>[] ps = m.getParameterTypes();
+                boolean isToast = m.getName().equals("X") && ps.length == 2
+                        && ps[0] == String.class && ps[1] == int.class;
+                boolean isDialog = (m.getName().equals("a") || m.getName().equals("F"))
+                        && ps.length == 4 && ps[1] == String.class
+                        && (ps[2] == String.class || ps[2] == CharSequence.class)
+                        && ps[3] == Runnable.class;
+                boolean isDialogZ = m.getName().equals("Z") && ps.length == 6
+                        && ps[1] == String.class && ps[2] == String.class
+                        && ps[3] == Runnable.class;
+                if (!isToast && !isDialog && !isDialogZ) {
+                    continue;
+                }
+                XposedBridge.hookMethod(m, new XC_MethodHook() {
+                    @Override
+                    protected void beforeHookedMethod(MethodHookParam param) {
+                        // 文案匹配 license 失败类 → 丢弃。license 调用点均不消费返回值，
+                        // 非 license 弹窗不会命中这些 app 专属文案，无误伤面。
+                        for (Object a : param.args) {
+                            if (a instanceof CharSequence && popupBlocked((CharSequence) a)) {
+                                XposedBridge.log(TAG + ": popup suppressed: "
+                                        + trunc(a, 60));
+                                param.setResult(null);
+                                return;
+                            }
+                        }
+                    }
+                });
+                hits++;
+            }
+            if (hits > 0) {
+                INSTALLED.put("a.js1.popupfilter", Boolean.TRUE);
+                XposedBridge.log(TAG + ": popup filter hooked x" + hits);
+            }
+        } catch (Throwable t) {
+            XposedBridge.log(TAG + ": popup filter FAILED: " + t);
+        }
     }
 
     /** 类名多候选版 tryHook：按顺序尝试每个 (class, method)，首个成功即止 */
