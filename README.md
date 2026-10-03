@@ -2,6 +2,8 @@
 
 针对 **Scene（com.omarea.vtools，N1 2026.09 Alpha8 / 2026.10 Alpha10）** 本地会员激活链路的逆向研究工具包：一个 LSPosed 模块（改写激活裁决 + 自动化 daemon 内存热补丁）+ 一套 ptrace 注入工具链。适配魔改版 LSPosed 2.2.0（legacy 桥接）、MIUI + KernelSU 真机环境。
 
+> **装好即用？** 完整安装/激活/排障说明见 **[使用教程 USAGE.md](USAGE.md)**；模块下载见 [Releases](https://github.com/hu847266h/scene-unlock-toolkit/releases/latest)。
+
 > 模块 hook 表按「Alpha10 优先、Alpha8 兜底」多候选尝试，两个版本通用；daemon 补丁偏移与版本一一对应（Alpha8 / Alpha10 两套见下表），其他版本需按「偏移速查表」一节的方法重新定位。
 
 ## 背景
