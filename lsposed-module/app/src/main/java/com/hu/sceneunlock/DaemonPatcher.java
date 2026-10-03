@@ -48,6 +48,8 @@ public final class DaemonPatcher {
     private static volatile long sLastAttempt = 0L;
     private static volatile Context sContext;
     private static volatile String sApkPath;
+    /** 最近一次成功打补丁的 daemon pid（看门狗据此判断 daemon 是否换新） */
+    private static volatile String sPatchedPid = null;
 
     private DaemonPatcher() {
     }
@@ -56,27 +58,73 @@ public final class DaemonPatcher {
     public static void onAttach(Context ctx) {
         if (sContext == null) {
             sContext = ctx;
-            Thread w = new Thread(new Runnable() {
-                @Override
-                public void run() {
-                    // App 启动后数秒内才会拉起 daemon，轮询等待
-                    for (int i = 0; i < 30; i++) {
-                        if (isDaemonRunning()) {
-                            requestPatch("worker: daemon detected");
-                            return;
-                        }
-                        try {
-                            Thread.sleep(2000L);
-                        } catch (InterruptedException e) {
-                            return;
-                        }
-                    }
-                    log("worker: daemon not seen in 60s, idle");
-                }
-            }, "SceneUnlock-PatchWorker");
-            w.setDaemon(true);
-            w.start();
+            startWorker();
+            startWatchdog();
         }
+    }
+
+    /** App 启动后数秒内才会拉起 daemon，轮询等待（一次性） */
+    private static void startWorker() {
+        Thread w = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                for (int i = 0; i < 30; i++) {
+                    if (isDaemonRunning()) {
+                        requestPatch("worker: daemon detected");
+                        return;
+                    }
+                    try {
+                        Thread.sleep(2000L);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                }
+                log("worker: daemon not seen in 60s, idle");
+            }
+        }, "SceneUnlock-PatchWorker");
+        w.setDaemon(true);
+        w.start();
+    }
+
+    /**
+     * 看门狗：每 30s 核对 daemon pid，变化即重打。
+     * 存在意义：verdict 触发（触发②）只在 App 发 activate 消息时出现——App 常驻主页后
+     * 只轮询数据不再 activate；若 daemon 死重启恰好撞上补丁请求 busy/冷却被丢弃，
+     * daemon 将一直裸奔（exec 类 action 返回空 → 概览/功能瘫痪），直到用户强停 App。
+     * pid 对比不依赖任何 verdict，30s 内必然收敛。
+     */
+    private static void startWatchdog() {
+        Thread w = new Thread(new Runnable() {
+            @Override
+            public void run() {
+                while (true) {
+                    try {
+                        Thread.sleep(30_000L);
+                    } catch (InterruptedException e) {
+                        return;
+                    }
+                    try {
+                        String pid = execSu("pgrep -o scene-daemon", 5);
+                        if (pid == null) {
+                            continue;
+                        }
+                        pid = pid.trim();
+                        if (!pid.matches("\\d+")) {
+                            continue;
+                        }
+                        if (!pid.equals(sPatchedPid)) {
+                            requestPatch("watchdog: daemon pid "
+                                    + (sPatchedPid == null ? "(none)" : sPatchedPid)
+                                    + " -> " + pid);
+                        }
+                    } catch (Throwable t) {
+                        log("watchdog round failed: " + t);
+                    }
+                }
+            }
+        }, "SceneUnlock-Watchdog");
+        w.setDaemon(true);
+        w.start();
     }
 
     /** DaemonVerdictHook 观察到未打补丁的裁决时回调 */
@@ -157,8 +205,16 @@ public final class DaemonPatcher {
                 + " && cp -f " + cache.getAbsolutePath() + "/* " + PATCH_DIR + "/"
                 + " && chmod 700 " + PATCH_DIR + "/mempoke2"
                 + " && sh " + PATCH_DIR + "/repatch.sh 2>&1";
+        String pidOut = execSu("pgrep -o scene-daemon", 5);
         String out = execSu(cmd, 60);
         log("repatch output:\n" + (out == null ? "(no output)" : out.trim()));
+        if (out != null && out.contains("patch applied")) {
+            sPatchedPid = pidOut != null && pidOut.trim().matches("\\d+")
+                    ? pidOut.trim() : null;
+            log("patched daemon pid=" + sPatchedPid);
+        } else if (out != null && out.contains("differs from patch baseline")) {
+            log("daemon binary changed, repatch aborted (offsets need relocation)");
+        }
     }
 
     /** 从模块 APK 释放 assets/scene_patch/* 到宿主 cacheDir/sp/ */
