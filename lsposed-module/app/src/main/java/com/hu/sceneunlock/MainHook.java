@@ -14,17 +14,19 @@ import de.robv.android.xposed.XposedHelpers;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 
 /**
- * Scene工具箱 (com.omarea.vtools) N1 2026.09 Alpha8 (versionCode 920260926)
+ * Scene工具箱 (com.omarea.vtools) N1 2026.10 Alpha10 ( hook 表按版本多候选 )：
+ *   Alpha10: a.s10.g/t/M/j, a.ns.a, a.a3.b/c
+ *   Alpha8 : a.zz.g/t/M/j,  a.vq.a,  a.b3.b/c
  * 专业版解锁模块 —— 基于《Scene工具箱 激活防护安全评估报告 v1.0》V1/V9 漏洞链：
  *
- *  L4 守护进程裁决应答无认证(V1)：a.zz.g(String) 将守护进程对 "activate" 消息的
+ *  L4 守护进程裁决应答无认证(V1)：s10.g(String) 将守护进程对 "activate" 消息的
  *     应答字符串原样透传（success@<ts> / expired / invalid / not-you / error），
  *     无签名、无 MAC、无挑战-应答。本模块在该唯一漏斗处统一改写为
  *     success@4102444800000（2100-01-01）。
- *  L2 本地状态机(V9, 从属)：a.vq.a()（授权缓存，toString 的数据源）与
- *     a.b3.b(String)（状态机）/ a.b3.c()（授权档位）一并强制为已激活/永久专业版。
- *  ROOT 功能门禁：a.zz.t() 是全应用 38 处工作模式判定的总闸，守护进程在线
- *     （a.zz.r()==true）时强制返回 "root"（守护进程 exec-shell 不做授权裁决，
+ *  L2 本地状态机(V9, 从属)：ns.a()（授权缓存，toString 的数据源）与
+ *     a3.b(String)（状态机）/ a3.c()（授权档位）一并强制为已激活/永久专业版。
+ *  ROOT 功能门禁：s10.t() 是全应用 38 处工作模式判定的总闸，守护进程在线
+ *     （s10.r()==true）时强制返回 "root"（守护进程 exec-shell 不做授权裁决，
  *     见报告 V1 复现链②③）。
  *
  * 不写 SharedPreferences、不拦截 exec-shell/scheduler 等常规消息、不伪造服务端凭证。
@@ -98,25 +100,57 @@ public class MainHook implements IXposedHookLoadPackage {
 
     private static synchronized void installAll(ClassLoader cl) {
         int before = INSTALLED.size();
-        tryHook(cl, "a.zz", "g", new Class[]{String.class}, new DaemonVerdictHook(true));
-        tryHook(cl, "a.zz", "t", new Class[0], new WorkingModeHook());
-        tryHook(cl, "a.vq", "a", new Class[0], new DaemonVerdictHook(false));
-        tryHook(cl, "a.b3", "b", new Class[]{String.class}, new StateModelHook(false));
-        tryHook(cl, "a.b3", "c", new Class[0], new StateModelHook(true));
-        // ---- 诊断探针：定位守护进程数据通道（请求/响应/TCP/加密）----
-        tryHookByName(cl, "a.zz", "M", 3, new DiagHook("REQ"));
-        tryHookByName(cl, "a.zz", "w", 2, new DiagHook("RESP"));
-        tryHookByName(cl, "a.zz", "v", 2, new DiagHook("TCP"));
-        tryHookByName(cl, "a.zz", "j", 1, new DiagHook("ENC"));
+        // 多候选 hook 表：每项按顺序尝试，首个命中的类生效（Alpha10 / Alpha8）
+        tryAnyHook(cl, new String[][]{{"a.s10", "g"}, {"a.zz", "g"}},
+                new Class[]{String.class}, new DaemonVerdictHook(true));
+        tryAnyHook(cl, new String[][]{{"a.s10", "t"}, {"a.zz", "t"}},
+                new Class[0], new WorkingModeHook());
+        tryAnyHook(cl, new String[][]{{"a.ns", "a"}, {"a.vq", "a"}},
+                new Class[0], new DaemonVerdictHook(false));
+        tryAnyHook(cl, new String[][]{{"a.a3", "b"}, {"a.b3", "b"}},
+                new Class[]{String.class}, new StateModelHook(false));
+        tryAnyHook(cl, new String[][]{{"a.a3", "c"}, {"a.b3", "c"}},
+                new Class[0], new StateModelHook(true));
+        // ---- 诊断探针：定位守护进程数据通道（请求/加密，仅打日志）----
+        tryAnyHookByName(cl, new String[][]{{"a.s10", "M"}, {"a.zz", "M"}},
+                3, new DiagHook("REQ"));
+        tryAnyHookByName(cl, new String[][]{{"a.s10", "j"}, {"a.zz", "j"}},
+                1, new DiagHook("ENC"));
         XposedBridge.log(TAG + ": hooks " + INSTALLED.size() + " (+" + (INSTALLED.size() - before) + ")");
     }
 
-    /** 按方法名+参数个数匹配（运行时参数类型如 a.d00 编译期不可见） */
-    private static void tryHookByName(ClassLoader cl, String className, String methodName,
-                                      int paramCount, XC_MethodHook hook) {
+    /** 类名多候选版 tryHook：按顺序尝试每个 (class, method)，首个成功即止 */
+    private static void tryAnyHook(ClassLoader cl, String[][] candidates,
+                                   Class<?>[] sig, XC_MethodHook hook) {
+        for (String[] c : candidates) {
+            if (tryHook(cl, c[0], c[1], sig, hook)) {
+                return;
+            }
+        }
+        StringBuilder sb = new StringBuilder("hook [");
+        for (int i = 0; i < candidates.length; i++) {
+            if (i > 0) sb.append(' ');
+            sb.append(candidates[i][0]).append('.').append(candidates[i][1]);
+        }
+        XposedBridge.log(TAG + ": " + sb.append("] FAILED: no candidate matched").toString());
+    }
+
+    /** 类名多候选版 tryHookByName：按名字+参数个数匹配 */
+    private static void tryAnyHookByName(ClassLoader cl, String[][] candidates,
+                                         int paramCount, XC_MethodHook hook) {
+        for (String[] c : candidates) {
+            if (tryHookByName(cl, c[0], c[1], paramCount, hook)) {
+                return;
+            }
+        }
+    }
+
+    /** 按方法名+参数个数匹配（运行时参数类型如 a.d00 编译期不可见），命中返回 true */
+    private static boolean tryHookByName(ClassLoader cl, String className, String methodName,
+                                         int paramCount, XC_MethodHook hook) {
         String key = className + "." + methodName + "/" + paramCount;
         if (INSTALLED.containsKey(key)) {
-            return;
+            return true;
         }
         try {
             Class<?> c = XposedHelpers.findClass(className, cl);
@@ -130,11 +164,13 @@ public class MainHook implements IXposedHookLoadPackage {
             if (hit > 0) {
                 INSTALLED.put(key, Boolean.TRUE);
                 XposedBridge.log(TAG + ": hooked " + key + " x" + hit);
-            } else {
-                XposedBridge.log(TAG + ": hook " + key + " NOT FOUND");
+                return true;
             }
+            XposedBridge.log(TAG + ": hook " + key + " NOT FOUND");
+            return false;
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": hook " + key + " FAILED: " + t);
+            return false;
         }
     }
 
@@ -173,11 +209,12 @@ public class MainHook implements IXposedHookLoadPackage {
         }
     }
 
-    private static void tryHook(ClassLoader cl, String className, String methodName,
-                                Class<?>[] sig, XC_MethodHook hook) {
+    /** 精确签名 hook，命中返回 true（多候选遍历用） */
+    private static boolean tryHook(ClassLoader cl, String className, String methodName,
+                                   Class<?>[] sig, XC_MethodHook hook) {
         String key = className + "." + methodName;
         if (INSTALLED.containsKey(key)) {
-            return;
+            return true;
         }
         try {
             Class<?> c = XposedHelpers.findClass(className, cl);
@@ -185,8 +222,10 @@ public class MainHook implements IXposedHookLoadPackage {
             XposedBridge.hookMethod(m, hook);
             INSTALLED.put(key, Boolean.TRUE);
             XposedBridge.log(TAG + ": hooked " + key);
+            return true;
         } catch (Throwable t) {
             XposedBridge.log(TAG + ": hook " + key + " FAILED: " + t);
+            return false;
         }
     }
 

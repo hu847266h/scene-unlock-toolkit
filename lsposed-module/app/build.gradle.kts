@@ -10,8 +10,8 @@ android {
         applicationId = "com.hu.sceneunlock"
         minSdk = 26
         targetSdk = 34
-        versionCode = 102
-        versionName = "1.3-auto-patch"
+        versionCode = 103
+        versionName = "1.4-alpha10"
     }
 
     buildTypes {

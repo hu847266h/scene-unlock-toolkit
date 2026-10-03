@@ -1,8 +1,8 @@
 # Scene Unlock Toolkit
 
-针对 **Scene（com.omarea.vtools，N1 2026.09 Alpha8）** 本地会员激活链路的逆向研究工具包：一个 LSPosed 模块（改写激活裁决 + 自动化 daemon 内存热补丁）+ 一套 ptrace 注入工具链。适配魔改版 LSPosed 2.2.0（legacy 桥接）、MIUI + KernelSU 真机环境。
+针对 **Scene（com.omarea.vtools，N1 2026.09 Alpha8 / 2026.10 Alpha10）** 本地会员激活链路的逆向研究工具包：一个 LSPosed 模块（改写激活裁决 + 自动化 daemon 内存热补丁）+ 一套 ptrace 注入工具链。适配魔改版 LSPosed 2.2.0（legacy 桥接）、MIUI + KernelSU 真机环境。
 
-> 补丁偏移与 Scene N1 Alpha8 的 scene-daemon（Go 1.24 / arm64 PIE / 魔改 UPX 壳）一一对应，其他版本需按「偏移速查表」一节的方法重新定位。
+> 模块 hook 表按「Alpha10 优先、Alpha8 兜底」多候选尝试，两个版本通用；daemon 补丁偏移与版本一一对应（Alpha8 / Alpha10 两套见下表），其他版本需按「偏移速查表」一节的方法重新定位。
 
 ## 背景
 
@@ -41,15 +41,17 @@ stubs/                 手写 legacy Xposed 桩（XC_MethodHook / XposedBridge /
 app/stubs/xposed-stubs.jar   compileOnly 依赖
 ```
 
-### Hook 表（运行时混淆名，N1 Alpha8）
+### Hook 表（运行时混淆名，Alpha10 / Alpha8）
 
-| 类 | 方法 | Hook | 作用 |
-|---|---|---|---|
-| `a.zz` | `g(String)` | `DaemonVerdictHook` | 改写 daemon 裁决：`expired/invalid` → `success@4102444800000`（2100-01-01） |
-| `a.zz` | `t()` | `WorkingModeHook` | 强制 working mode = root |
-| `a.vq` | `a()` | `DaemonVerdictHook` | 同上（另一条裁决回传路径） |
-| `a.b3` | `b(String)` / `c()` | `StateModelHook` | 激活状态机：`b` 写入 verdict、`c` 读取 |
-| `a.zz` | `M/w/v/j` | `DiagHook` | 诊断探针：REQ / RESP / TCP / ENC，仅打日志 |
+MainHook 按 `tryAnyHook` 多候选机制依次尝试，首个命中的类生效（混淆名随版本漂移，g/t/r/l、b/c 等成员名在两版间保持稳定，类名变了）：
+
+| 功能 | Alpha10 | Alpha8 | Hook | 作用 |
+|---|---|---|---|---|
+| 裁决漏斗 | `a.s10.g(String)` | `a.zz.g(String)` | `DaemonVerdictHook` | 改写 daemon 裁决：`expired/invalid` → `success@4102444800000`（2100-01-01） |
+| 工作模式闸 | `a.s10.t()` | `a.zz.t()` | `WorkingModeHook` | daemon 在线（`r()==true`）时强制返回 `root`（静态字段 `l` 两版同名） |
+| 授权缓存 | `a.ns.a()` | `a.vq.a()` | `DaemonVerdictHook` | 同上（缓存 toString 的数据源，供状态机读取） |
+| 激活状态机 | `a.a3.b(String)` / `c()` | `a.b3.b(String)` / `c()` | `StateModelHook` | 强制 `ActivatedStateModel` 为已激活/永久专业版（setter 未混淆，两版一致） |
+| 诊断探针 | `a.s10.M/3`、`j/1` | `a.zz.M/3`、`j/1` | `DiagHook` | REQ / ENC 请求与加密日志，仅诊断用 |
 
 ### 踩坑记录（魔改 LSPosed 2.2.0 + MIUI）
 
@@ -73,10 +75,22 @@ app/stubs/xposed-stubs.jar   compileOnly 依赖
 
 | 偏移 | vaddr | 原始字节 | 补丁字节 | 含义 |
 |---|---|---|---|---|
+**N1 Alpha8**（memfd text 0x2AD000 = 2805760 B，memfd 偏移 = vaddr − 0x2CA000）：
+
+| memfd 偏移 | vaddr | 原始字节 | 补丁字节 | 含义 |
+|---|---|---|---|---|
 | `0x1e562c` | `0x4af62c` | `ad030054` (`b.le`) | `1f2003d5` (`nop`) | Function A：校验剩余时长 ≤0 跳 expired，放行让 success 路径接管 |
 | `0x1ee6e4` | `0x4b86e4` | `ec000054` (`b.gt`) | `07000014` (`b +28`) | Function B：强制走 success 分支 |
 | `0x1ee6ec` | `0x4b86ec` | `00d01291` (`add x0,x0,#0x4b4`) | `00b41291` (`#0x4ad`) | expired 字符串引用 → invalid（对照实验遗留，兼作兜底） |
 | `0x2acf00` | `0x576f00` | 全零（3KB 空白区） | 48B shellcode | icache 失效 stub，`mov x4, xzr; b .` 为完成标志 |
+
+**N1 Alpha10**（memfd text 0x2B9000 = 2854912 B；daemon 有 stub + text 两个 memfd 映射，repatch v4 自动选最大 r-xs 段；SITE3 免除——模块侧改写裁决后字符串兜底无意义）：
+
+| memfd 偏移 | 原始字节 | 补丁字节 | 含义 |
+|---|---|---|---|
+| `0x1e554c` | `ad030054` (`b.le`) | `1f2003d5` (`nop`) | Function A：同上，`bl 0x1e3a10`（有效期解析）后 `cmp x0,#0; b.le` 跳失败路径 |
+| `0x1e3b40` | `ac000054` (`b.gt +20`) | `05000014` (`b +20`) | Function B：强制走 success 返回（解析出的时间戳，`success@<ts>`） |
+| `0x2b8938` | 全零（1736B 空白区） | 48B shellcode | icache 失效 stub，同 Alpha8 |
 
 裁决字符串 vaddr：`invalid=0xc04ad`、`expired=0xc04b4`、`not-you=0xc04bb`、`success@=0xc0fc0`（LOAD1 rodata）。
 
@@ -130,7 +144,7 @@ adb shell "su -c 'sh /data/local/tmp/scene_patch/repatch.sh'"
 
 ## 偏移速查表（换版本重新定位的方法）
 
-1. `ps -A | grep scene-daemon` 找 pid，`SIGSTOP` 后 `cat /proc/pid/map_files/<memfd区间> > dump.bin` 拿干净 text（0x2AD000，延迟 ≤60ms 防止调度写脏页）。
+1. `ps -A | grep scene-daemon` 找 pid，`SIGSTOP` 后 `cat /proc/pid/map_files/<memfd区间> > dump.bin` 拿干净 text（Alpha8 为 0x2AD000、Alpha10 为 0x2B9000，延迟 ≤60ms 防止调度写脏页）。**注意 Alpha10 起 daemon 有 stub（8KB）+ text（2.9MB）两个 r-xs memfd 映射，必须选最大的那段**。
 2. 在 dump 里 `find "expired\x00"` 等裁决字符串 → 得到 vaddr（全 dump 坐标 − LOAD 偏移）。
 3. 扫描 text 段 ADRP+ADD 对引用这些字符串的代码（参考仓库外脚本，或用 capstone 反汇编函数边界）。
 4. 用 capstone 读出裁决分支（`cmp x0,#0` + `b.le/b.gt`）与 `add x0,x0,#imm` 字符串引用，即可填出上表 4 个偏移。

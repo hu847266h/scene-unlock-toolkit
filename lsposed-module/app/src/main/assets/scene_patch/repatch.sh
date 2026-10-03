@@ -1,20 +1,19 @@
 #!/system/bin/sh
 # ============================================================
-# scene-daemon memory hotpatch - one-shot re-apply script (v3)
-# Re-apply patch after scene-daemon restart (reboot / app update).
+# scene-daemon memory hotpatch - one-shot re-apply script (v4, Alpha10)
+# daemon: N1 2026.10 Alpha10 memfd text 0x2B9000
+# Changes vs v3: pick LARGEST r-xs memfd (stub + text mappings now),
+#                new offsets, SITE3 dropped.
 # Usage: su -c "sh /data/local/tmp/scene_patch/repatch.sh"
 # Needs: /data/local/tmp/scene_patch/{memfd_patched.bin, mempoke2}
 # ============================================================
 DIR=/data/local/tmp/scene_patch
 IMG=$DIR/memfd_patched.bin
 POKE=$DIR/mempoke2
-# memfd code segment size (0x2AD000)
-IMGSZ=2805760
-# patch offsets inside memfd
-OFF_SC=0x2acf00    # shellcode slot (48-byte 4-addr icache flusher)
-OFF_S1=0x1e562c    # SITE1: b.le -> nop   (Function A license branch)
-OFF_S2=0x1ee6e4    # SITE2: b.gt -> b     (Function B force success path)
-OFF_S3=0x1ee6ec    # ADD imm: #0x4b4(expired) -> #0x4ad(invalid)
+IMGSZ=2854912
+OFF_SC=0x2b8938
+OFF_S1=0x1e554c
+OFF_S2=0x1e3b40
 
 PID=$(pgrep -o scene-daemon)
 if [ -z "$PID" ]; then
@@ -22,12 +21,19 @@ if [ -z "$PID" ]; then
     exit 1
 fi
 
-LINE=$(grep -a "memfd:upx" /proc/$PID/maps | grep "r-xs" | head -1)
-if [ -z "$LINE" ]; then
+# pick the LARGEST r-xs memfd mapping (v4: stub mapping is small, text is big)
+grep -a "memfd" /proc/$PID/maps | grep "r-xs" > "$DIR/.maps"
+B=""; BSZ=0
+while read -r ADDR REST; do
+    S=${ADDR%%-*}; E=${ADDR#*-}
+    SZ=$(( 0x$E - 0x$S ))
+    if [ "$SZ" -gt "$BSZ" ]; then BSZ=$SZ; B=$S; fi
+done < "$DIR/.maps"
+rm -f "$DIR/.maps"
+if [ -z "$B" ]; then
     echo "[!] memfd code mapping not found"
     exit 1
 fi
-B=$(echo "$LINE" | cut -d- -f1)
 
 ENT=$(ls /proc/$PID/map_files/ 2>/dev/null | grep "^$B" | head -1)
 if [ -z "$ENT" ]; then
@@ -35,7 +41,7 @@ if [ -z "$ENT" ]; then
     exit 1
 fi
 M="/proc/$PID/map_files/$ENT"
-echo "[*] pid=$PID base=0x$B map=$M"
+echo "[*] pid=$PID base=0x$B map=$M size=$BSZ"
 
 # 1) version safety check, then full overwrite with patched image
 cat "$M" > "$DIR/.cur.bin" 2>/dev/null
@@ -56,18 +62,15 @@ dd if=$IMG of="$M" bs=4096 conv=notrunc 2>/dev/null
 echo "[*] baseline check ok (diff=$DIFF), image written ($IMGSZ bytes)"
 
 # 2) per-thread ptrace injection: run icache flush shellcode
-#    (main thread may be stuck in a syscall where PC patching is useless;
-#     try every thread until one reports x4==0)
-SC=$(awk -v s=$((0x$B)) 'BEGIN{printf "%x", s+0x2acf00}')
-A1=$(awk -v s=$((0x$B)) 'BEGIN{printf "%x", s+0x1e562c}')
-A2=$(awk -v s=$((0x$B)) 'BEGIN{printf "%x", s+0x1ee6e4}')
-A3=$(awk -v s=$((0x$B)) 'BEGIN{printf "%x", s+0x1ee6ec}')
+SC=$(awk -v s=$((0x$B)) 'BEGIN{printf "%x", s+'$OFF_SC'}')
+A1=$(awk -v s=$((0x$B)) 'BEGIN{printf "%x", s+'$OFF_S1'}')
+A2=$(awk -v s=$((0x$B)) 'BEGIN{printf "%x", s+'$OFF_S2'}')
 
 OK=0
 for TID in $(ls /proc/$PID/task/); do
     ST=$(awk '{print $3}' /proc/$PID/task/$TID/stat 2>/dev/null)
     echo "[*] try thread $TID (state=$ST) ..."
-    if $POKE $TID $SC $A1 $A2 $A3 $SC; then
+    if $POKE $TID $SC $A1 $A2 $SC $SC; then
         OK=1
         echo "[+] thread $TID injected ok"
         break
@@ -86,5 +89,5 @@ else
 fi
 
 # 3) sanity check on listen port
-ss -tlnp | grep -q 14754 && echo "[+] TCP 14754 listening" || echo "[!] 14754 not listening (idle daemon is fine, restart app to wake it)"
+ss -tlnp 2>/dev/null | grep -q 14754 && echo "[+] TCP 14754 listening" || echo "[!] 14754 not listening (idle daemon is fine, restart app to wake it)"
 exit 0
